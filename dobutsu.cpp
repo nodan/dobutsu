@@ -4,11 +4,16 @@
   (c) Kai Tomerius, 2017
  */
 
+#include <fcntl.h>
 #include <iostream>
 #include <iomanip>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 // board dimensions
 #define H 4
@@ -29,14 +34,21 @@
 // <6 bits for 39 legal, non-final positions for non-adjacent lions
 #define S (L*(1ULL<<(2+D+2*(N-2)+1)))
 
+// bitmasks for hashtable scan
+#define ILLEGAL  0x00
+#define LEGAL    0x01
+#define EOHT     0xff
+
 typedef unsigned char uint8;
 typedef unsigned int uint32;
 typedef unsigned long long uint64;
 
+static uint8* hashtable = NULL;
+
 class Board {
 private:
     // lookup tables
-    static uint8 lionPositions[2*L];
+    static uint8 lionPosition[2*L];
     static uint8 lionGrid[N][N];
     static uint8 animal[4];
 
@@ -120,7 +132,7 @@ public:
     static void initialize() {
         memset(lionGrid, ~0, sizeof(lionGrid));
         for (int i=0; i<L; i++) {
-            lionGrid[lionPositions[2*i]][lionPositions[2*i+1]] = i;
+            lionGrid[lionPosition[2*i]][lionPosition[2*i+1]] = i;
         }
     }
 
@@ -160,6 +172,10 @@ private:
     }
 
 public:
+    Board(const char* s="ELG C  c gle      ") : illegal(0) {
+        memcpy(grid, s, sizeof(grid));
+    }
+
     Board(uint64 h) : illegal(h>=S) {
         memset(grid, ' ', sizeof(grid));
         if (illegal) {
@@ -167,8 +183,8 @@ public:
         }
 
         // decode the position of both lions
-        grid[lionPositions[2*(h>>29)]] = 'L';
-        grid[lionPositions[2*(h>>29)+1]] = 'l';
+        grid[lionPosition[2*(h>>29)]] = 'L';
+        grid[lionPosition[2*(h>>29)+1]] = 'l';
 
         // board orientation
         sente = h & 0x01 ? 0 : 1;
@@ -334,7 +350,7 @@ public:
 };
 
 // lookup tables
-uint8 Board::lionPositions[2*L] = { 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 1, 6, 1, 7, 1, 8, 1, 9, 1, 10, 1, 11, 2, 3, 2, 6, 2, 7, 2, 8, 2, 9, 2, 10, 2, 11, 3, 5, 3, 8, 3, 9, 3, 10, 3, 11, 4, 9, 4, 10, 4, 11, 5, 3, 5, 6, 5, 9, 5, 10, 5, 11, 6, 5, 6, 8, 6, 11, 8, 3, 8, 6, 8, 9 };
+uint8 Board::lionPosition[2*L] = { 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 1, 6, 1, 7, 1, 8, 1, 9, 1, 10, 1, 11, 2, 3, 2, 6, 2, 7, 2, 8, 2, 9, 2, 10, 2, 11, 3, 5, 3, 8, 3, 9, 3, 10, 3, 11, 4, 9, 4, 10, 4, 11, 5, 3, 5, 6, 5, 9, 5, 10, 5, 11, 6, 5, 6, 8, 6, 11, 8, 3, 8, 6, 8, 9 };
 
 uint8 Board::lionGrid[N][N];
 
@@ -343,12 +359,15 @@ uint8 Board::animal[4] = { ' ', 'C', 'E', 'G' }; // promote C->D
 int main(int argc, const char** argv) {
     // command line options
     int check = 0;
+    int depth = 0;
     int print = argc==1;
     uint64 start = 0;
     uint64 stop = S;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i], "-c")) {
             check = 1;
+        } else if (!strcmp(argv[i], "-d") && i+1<argc) {
+            depth = strtoll(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "-p")) {
             print = 1;
         } else if (!strcmp(argv[i], "-s") && i+1<argc) {
@@ -362,47 +381,97 @@ int main(int argc, const char** argv) {
         }
     }
 
-    uint64 n = 0;
+    // hash table
+    int fd = open("dobutsu.hash", O_CREAT | O_LARGEFILE | O_RDWR, 0664);
+    if (fd<0) {
+        std::cout << "error: failed to open hash table" << std::endl;
+    } else if (lseek(fd, S, SEEK_SET)!=S) {
+        std::cout << "error: failed to access hash table of size " << S << std::endl;
+    } else {
+        write(fd, "\377", 1);
+        hashtable = (uint8*) mmap(NULL, S, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
+
+        if (!hashtable) {
+            std::cout << "error: failed to map hash table" << std::endl;
+        }
+    }
+
     Board::initialize();
 
     struct timeval t0;
     gettimeofday(&t0, NULL);
 
-    // iterate over all possible hash values for sente (+=2)
-    for (uint64 h=start; h<stop; h+=2) {
-        if ((h & ((1<<21)-1))==0) {
-            // print progress every 1M moves
-            std::cout << std::setprecision(3) << 100.0*h/(stop-start) << "%\r" << std::flush;
-        }
-
-        Board b(h);
-
-        // count legal positions
-        if (b) {
-            n++;
-
-            if (print) {
-                std::cout << std::hex << "0x" << h << std::dec << std::endl;
-                b.print();
-                std::cout << std::endl;
+    if (check || print) {
+        // iterate over all possible hash values for sente (+=2)
+        uint64 n = 0;
+        for (uint64 h=start; h<stop; h+=2) {
+            if ((h & ((1<<21)-1))==0) {
+                // print progress every 1M moves
+                std::cout << std::setprecision(3) << 100.0*h/(stop-start) << "%\r" << std::flush;
             }
 
-            if (check) {
-                if (b()!=h) {
-                    std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
+            Board b(h);
 
-                    break;
+            // count legal positions
+            if (b) {
+                n++;
+
+                if (print) {
+                    std::cout << std::hex << "0x" << h << std::dec << std::endl;
+                    b.print();
+                    std::cout << std::endl;
+                }
+
+                if (check) {
+                    if (b()==h) {
+                        if (fd>0) {
+                            lseek(fd, h, SEEK_SET);
+                            write(fd, "\001", 1);
+                        }
+                    } else {
+                        std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
+
+                        break;
+                    }
                 }
             }
         }
+
+        // 336760432 positions
+        std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%)" << std::endl;
     }
 
-    // 336760432 positions
-    std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%)" << std::endl;
+    if (depth) {
+        Board b;
+        std::cout << std::hex << "0x" << b() << std::dec << std::endl;
+        b.print();
+
+        uint64 n = 0;
+        for (uint64 h=start; h<stop; h+=2) {
+            if ((h & ((1<<21)-1))==0) {
+                // print progress every 1M moves
+                std::cout << std::setprecision(3) << 100.0*h/(stop-start) << "%\r" << std::flush;
+            }
+
+            if (hashtable[h] & LEGAL) {
+                n++;
+            }
+        }
+
+        std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%)" << std::endl;
+    }
 
     struct timeval t;
     gettimeofday(&t, NULL);
     std::cout << t.tv_sec - t0.tv_sec << "s" << std::endl;
+
+    if (hashtable) {
+        munmap(hashtable, S);
+    }
+
+    if (fd>0) {
+        close(fd);
+    }
 
     return 0;
 }

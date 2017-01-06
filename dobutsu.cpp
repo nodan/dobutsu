@@ -20,7 +20,7 @@
 #define W 3
 #define N (H*W)
 
-// pieces that can be on hand
+// number of pieces that can be on hand
 #define D 6
 
 // number of legal, non-final positions for non-adjacent lions
@@ -64,8 +64,8 @@ private:
         uint32 i;
 
     public:
-        PieceIterator(uint8* grid, uint32 i)
-            : grid(grid), i(i) {
+        PieceIterator(uint8* grid)
+            : grid(grid), i(~0) {
         }
 
         operator void*() const {
@@ -81,7 +81,7 @@ private:
         }
 
         PieceIterator& operator++() {
-            while (++i<N+D && grid[i]==' ') ;
+            while (++i<N+D && (grid[i]==' ' || (grid[i] & ('l'-'L')))) ;
             return *this;
         }
     };
@@ -94,38 +94,105 @@ private:
         uint32 i;
 
     public:
-        MoveIterator(const PieceIterator& p)
-            : grid(&p), n(p()), i(p()<4 ? 4-p() : 0) {
+        MoveIterator()
+            : grid(NULL), n(N), i(N) {
+        }
+
+        MoveIterator& reset(const PieceIterator& p) {
+            grid = &p;
+            n = p();
+            i = p()<N ? p()<4 ? 4-p()-1 : ~0 : ~0;
+            return *this;
+        }
+
+        MoveIterator(const PieceIterator& p) {
+            reset(p);
         }
 
         operator void*() {
             return
-                n<N ? i<10 && n-5+i<N ? this : NULL :
+                n<N ? i<9 && n-4+i<N ? this : NULL :
                 i<N ? this : NULL;
         }
 
         int operator==(uint32 l) {
-            return n-5+i==l;
+            return n<N ? n-4+i==l : i==l;
+        }
+
+        uint32 from() const {
+            return n;
+        }
+
+        uint32 to() const {
+            return n<N ? n-4+i : i;
         }
 
         MoveIterator& operator++() {
-            if (n<N) {
-                ++i;
-                switch (grid[n]) {
-                case 'l':
-                case 'L':
-                    if (n%3==0 && i%3==1) ++i;
-                    if (i==5) ++i;
-                    if (n%3==2 && i%3==0) ++i;
-                    break;
-                }
+            while ((n<N && ++i<9 &&
+                    (i==4 ||
+                     (n%3==0 && i%3==0) ||
+                     (n%3==2 && i%3==2) ||
+                     (grid[n-4+i]!=' ' &&
+                      !((grid[n]^grid[n-4+i]) & ('l'-'L'))) ||
+                     ((grid[n] & 0x0f)==('C' & 0x0f) && i!=7) ||
+                     ((grid[n] & 0x0f)==('D' & 0x0f) && (i==0 || i==2)) ||
+                     ((grid[n] & 0x0f)==('E' & 0x0f) && (i&1)) ||
+                     ((grid[n] & 0x0f)==('G' & 0x0f) && !(i&1)))) ||
+                   (n>=N && ++i<N && grid[i]!=' ')) ;
 
-                return *this;
-            } else {
-                while (++i<N && grid[i]!=' ') ;
-            }
+            return *this;
         }
     };
+
+public:
+    class PositionIterator {
+    private:
+        uint8* grid;
+        int sente;
+        PieceIterator piece;
+        MoveIterator move;
+        Board* board;
+
+    public:
+        PositionIterator(uint8* grid, int sente)
+            : grid(grid), sente(sente), piece(grid), board(NULL) {
+        }
+
+        operator void*() {
+            if (!move) {
+                delete this;
+                return NULL;
+            }
+
+            return this;
+        }
+
+        PositionIterator& operator++() {
+            if (board) {
+                delete board;
+                board = NULL;
+            }
+
+            while (!++move && ++piece) {
+                move.reset(piece);
+            }
+
+            return *this;
+        }
+
+        Board& operator()() {
+            board = new Board(grid, sente, move);
+            return *board;
+        }
+
+        const PieceIterator& getPiece() const {
+            return piece;
+        }
+
+        const MoveIterator& getMove() const {
+            return move;
+        }
+};
 
 public:
     // initialize lookup tables
@@ -143,14 +210,14 @@ private:
     }
 
     // find a piece on the board
-    int find(uint8 p) {
-        for (int i=0; i<N; i++) {
+    int find(uint8 p, int start=0, int end=N) {
+        for (int i=start; i<end; i++) {
             if (grid[i]==p) {
                 return i;
             }
         }
 
-        return N;
+        return end;
     }
 
     // flip the board for gote
@@ -172,15 +239,31 @@ private:
     }
 
 public:
-    Board(const char* s="ELG C  c gle      ") : illegal(0) {
+    Board(const char* s="ELG C  c gle      ", int sente=1)
+        : sente(sente), illegal(0) {
         memcpy(grid, s, sizeof(grid));
     }
 
-    Board(uint64 h) : illegal(h>=S) {
-        memset(grid, ' ', sizeof(grid));
+    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0) {
+        memcpy(grid, g, sizeof(grid));
+
+        if (grid[move.to()]!=' ') {
+            grid[find(' ', N, N+D)] = grid[move.to()]^('l'-'L');
+        }
+
+        grid[move.to()] = grid[move.from()];
+        grid[move.from()] = ' ';
+        flip();
+        sente = !s;
+    }
+
+    Board(uint64 h)
+        : sente(0), illegal(h>=S) {
         if (illegal) {
             return;
         }
+
+        memset(grid, ' ', sizeof(grid));
 
         // decode the position of both lions
         grid[lionPosition[2*(h>>29)]] = 'L';
@@ -347,6 +430,27 @@ public:
             std::cout << std::endl;
         }
     }
+
+    // generate moves
+    PositionIterator& children() {
+        return *new PositionIterator(grid, sente);
+    }
+
+    // recursively search to a given depth
+    Board& search(int depth) {
+        if (depth>0) {
+            Board& b = *this;
+            std::cout << std::hex << "0x" << b() << std::dec << std::endl;
+            b.print();
+
+            for (Board::PositionIterator& child=b.children(); ++child;) {
+                std::cout << "move" << child.getMove().from() << "->" << child.getMove().to() << std::endl;
+                child().search(depth-1);
+            }
+        } else {
+            print();
+        }
+    }
 };
 
 // lookup tables
@@ -375,7 +479,8 @@ int main(int argc, const char** argv) {
         } else if (!strcmp(argv[i], "-t") && i+1<argc) {
             stop = strtoll(argv[++i], NULL, 0);
         } else {
-            std::cout << "usage: " << argv[0] << "[-c] [-p] [-s <start>] [-t <stop>]" << std::endl
+            std::cout << "usage: " << argv[0] << " [-c] [-p] [-s <start>] [-t <stop>]" << std::endl
+                      << "usage: " << argv[0] << " [-d <depth>] [-s <start>] [-t <stop>]" << std::endl
                       << "defaults: start=0, stop=" << std::hex << S << std::dec << std::endl;
             return 0;
         }
@@ -443,8 +548,7 @@ int main(int argc, const char** argv) {
 
     if (depth) {
         Board b;
-        std::cout << std::hex << "0x" << b() << std::dec << std::endl;
-        b.print();
+        b.search(depth);
 
         uint64 n = 0;
         for (uint64 h=start; h<stop; h+=2) {

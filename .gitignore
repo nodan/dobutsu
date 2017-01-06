@@ -28,4 +28,5 @@
 *.out
 *.app
 dobutsu
-dobutsu.hash
+hashtable
+hashtable.gz

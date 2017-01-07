@@ -15,6 +15,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+static int verbose = 0;
+
 // helper macro
 #define min(a, b) ((a)<(b)? (a) : (b))
 
@@ -55,11 +57,104 @@
 // bitmasks for hashtable
 #define ILLEGAL  0x00
 #define LEGAL    0x01
+#define WIN      0x02
+#define LOSS     0x04
 #define EOHT     0xff
 
 typedef unsigned char uint8;
 typedef unsigned int uint32;
 typedef unsigned long long uint64;
+
+// hashtable in memory or on disk
+class Hashtable {
+private:
+    static Hashtable* instance;
+    static uint64 won;
+    static uint64 lost;
+
+    uint64 size;
+    int fd;
+    uint8* map;
+
+public:
+    static uint8 enter(uint64 h, uint8 m) {
+        if (instance && instance->map && instance->size>h) {
+            if (!((*instance)[h] & m)) {
+                if (m & WIN) {
+                    won++;
+                }
+
+                if (m & LOSS) {
+                    lost++;
+                }
+
+                return (*instance)[h] |= m;
+            }
+
+            return 0;
+        }
+
+        if (m & WIN) {
+            won++;
+        }
+
+        if (m & LOSS) {
+            lost++;
+        }
+
+        return m;
+    }
+
+    static uint64 wins() {
+        return won;
+    }
+
+    static uint64 losses() {
+        return lost;
+    }
+
+    Hashtable(uint64 size, const char* hashtablename=NULL)
+        : size(size), fd(-1), map(NULL) {
+        if (hashtablename &&
+            (fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664))>0 &&
+             lseek(fd, size, SEEK_SET)==size) {
+            write(fd, "\377", 1);
+            map = (uint8*) mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
+        } else {
+            map = (uint8*) malloc(size);
+        }
+
+        instance = this;
+    }
+
+    ~Hashtable() {
+        instance = NULL;
+
+        if (fd>0) {
+            if (map) {
+                munmap(map, S);
+            }
+
+            close(fd);
+        } else {
+            if (map) {
+                free(map);
+            }
+        }
+    }
+
+    operator void*() {
+        return map;
+    }
+
+    uint8& operator[](uint64 n) {
+        return map[n];
+    }
+};
+
+Hashtable* Hashtable::instance = NULL;
+uint64 Hashtable::won = 0;
+uint64 Hashtable::lost = 0;
 
 class Board {
 private:
@@ -177,6 +272,12 @@ public:
             : grid(grid), sente(sente), piece(grid), board(NULL) {
         }
 
+        ~PositionIterator() {
+            if (board) {
+                delete board;
+            }
+        }
+
         operator void*() {
             if (!move) {
                 delete this;
@@ -200,7 +301,10 @@ public:
         }
 
         Board& operator()() {
-            board = new Board(grid, sente, move);
+            if (!board) {
+                board = new Board(grid, sente, move);
+            }
+
             return *board;
         }
 
@@ -269,10 +373,11 @@ public:
 
         if (ANIMAL(grid[move.to()])) {
             if (ANIMAL(grid[move.to()])==LION) {
-                win++;
+                // losing the lions loses the game
+                loss = __LINE__;
             }
 
-            grid[find(EMPTY, N, N+D)] = grid[move.to()]^GOTE;
+            grid[find(EMPTY, N, N+D)] = FLIP(grid[move.to()]);
         }
 
         grid[move.to()] = grid[move.from()];
@@ -286,23 +391,17 @@ public:
 
             if (ANIMAL(grid[move.to()])==LION) {
                 // lion on final rank
-                deeper++;
+                deeper += 2;
             }
         }
 
         flip();
         sente = !s;
-        if (win) {
-            win = 0;
-            loss++;
-        } else if (loss) {
-            win++;
-            loss = 0;
-        }
 
         for (int i=N-W; i<N; i++) {
             if (SENTE(grid[i]) && ANIMAL(grid[i])==LION) {
-                win++;
+                // a lion surving on final rank wins
+                win = __LINE__;
                 break;
             }
         }
@@ -474,7 +573,13 @@ public:
                 }
             }
 
-            std::cout << (win ? " won" : loss ? " lost" : "") << std::endl;
+            if (win) {
+                std::cout << " is won #" << win << std::endl;
+            }
+
+            if (loss) {
+                std::cout << " is lost #" << loss << std::endl;
+            }
         }
     }
 
@@ -484,21 +589,31 @@ public:
     }
 
     // recursively search to a given depth
-    Board& search(int depth) {
-        if (!win && !loss && depth+deeper>0) {
-            Board& b = *this;
-            std::cout << std::hex << "0x" << b() << std::dec << std::endl;
-            b.print();
-            std::cout << std::endl;
-
-            for (Board::PositionIterator& child=b.children(); ++child;) {
-                std::cout << "move" << child.getMove().from() << "->" << child.getMove().to() << std::endl;
-                child().search(depth+deeper-1);
+    int search(int depth) {
+        Board& b = *this;
+        if (!win && !loss) {
+            if (depth+deeper>0) {
+                loss = __LINE__;
+                for (Board::PositionIterator& child=b.children(); !win && ++child;) {
+                    int rc = child().search(depth-1+deeper);
+                    if (rc<=0) {
+                        loss = 0;
+                        win = -rc;
+                    }
+                }
             }
-        } else {
-            print();
-            std::cout << std::endl;
         }
+
+        if (win || loss) {
+            uint64 h = b();
+            if (Hashtable::enter(h, win ? WIN : LOSS) && verbose) {
+                std::cout << std::hex << "0x" << b() << std::dec << std::endl;
+                b.print();
+                std::cout << std::endl;
+            }
+        }
+
+        return win ? win : loss;
     }
 };
 
@@ -508,59 +623,6 @@ uint8 Board::lionPosition[2*L] = { 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 1
 uint8 Board::lionGrid[N][N];
 
 uint8 Board::animal[4] = { EMPTY, PIECE_SENTE(CHICK), PIECE_SENTE(ELEPHANT), PIECE_SENTE(GIRAFFE) }; // promote C->D
-
-// hashtable on disk
-class Hashtable {
-private:
-    int fd;
-    uint8* map;
-    static Hashtable* instance;
-
-public:
-    static Hashtable& get() {
-        return *instance;
-    }
-
-    Hashtable(uint64 size, const char* hashtablename=NULL)
-        : fd(-1), map(NULL) {
-        if (hashtablename &&
-            (fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664)>0 &&
-             lseek(fd, size, SEEK_SET)==size)) {
-            write(fd, "\377", 1);
-            map = (uint8*) mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
-        } else {
-            map = (uint8*) malloc(size);
-        }
-
-        instance = this;
-    }
-
-    ~Hashtable() {
-        instance = NULL;
-
-        if (fd>0) {
-            if (map) {
-                munmap(map, S);
-            }
-
-            close(fd);
-        } else {
-            if (map) {
-                free(map);
-            }
-        }
-    }
-
-    operator void*() {
-        return map;
-    }
-
-    uint8& operator[](uint64 n) {
-        return map[n];
-    }
-};
-
-Hashtable* Hashtable::instance = NULL;
 
 int main(int argc, const char** argv) {
     // command line options
@@ -580,10 +642,10 @@ int main(int argc, const char** argv) {
             check = 1;
         } else if (!strcmp(argv[i], "-d") && i+1<argc) {
             depth = strtoll(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "-f") && i+1<argc) {
+            hashtablename = argv[++i];
         } else if (!strcmp(argv[i], "-g")) {
             gote = 1;
-        } else if (!strcmp(argv[i], "-h") && i+1<argc) {
-            hashtablename = argv[++i];
         } else if (!strcmp(argv[i], "-n")) {
             count = 1;
         } else if (!strcmp(argv[i], "-p")) {
@@ -592,9 +654,11 @@ int main(int argc, const char** argv) {
             start = strtoll(argv[++i], NULL, 0) & ~1ULL;
         } else if (!strcmp(argv[i], "-t") && i+1<argc) {
             stop = strtoll(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "-v")) {
+            verbose = 1;
         } else {
-            std::cout << "usage: " << argv[0] << " [-c] [-h hashtable] [-n] [-p] [-s <start>] [-t <stop>]" << std::endl
-                      << "usage: " << argv[0] << " [-b <board>] [-d <depth>] [-g] [-h hashtable]" << std::endl
+            std::cout << "usage: " << argv[0] << " [-c] [-f hashtable] [-n] [-p] [-s <start>] [-t <stop>] [-v]" << std::endl
+                      << "usage: " << argv[0] << " [-b <board>] [-d <depth>] [-g] [-f hashtable] [-v]" << std::endl
                       << "defaults: start=0, stop=" << std::hex << S << std::dec << std::endl;
             return 0;
         }
@@ -654,8 +718,12 @@ int main(int argc, const char** argv) {
 
     if (depth) {
         // search to the given depth
-        Board b(pos, !gote);
-        b.search(depth);
+        for (int d=0; d++<depth;) {
+            Board b(pos, !gote);
+            std::cout << "depth " << d << "\r" << std::flush;
+            b.search(d);
+            std::cout << Hashtable::wins() << " wins, " << Hashtable::losses() << " losses" << std::endl;
+        }
     }
 
     if (count) {

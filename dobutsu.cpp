@@ -15,6 +15,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+// helper macro
+#define min(a, b) ((a)<(b)? (a) : (b))
+
 // board dimensions
 #define H 4
 #define W 3
@@ -34,9 +37,22 @@
 // <6 bits for 39 legal, non-final positions for non-adjacent lions
 #define S (L*(1ULL<<(2+D+2*(N-2)+1)))
 
-#define min(a, b) ((a)<(b)? (a) : (b))
+// bitmasks for pieces
+#define EMPTY                 ' '
+#define CHICK                 ANIMAL('C')
+#define HEN                   ANIMAL('D')
+#define ELEPHANT              ANIMAL('E')
+#define GIRAFFE               ANIMAL('G')
+#define LION                  ANIMAL('L')
+#define GOTE                  ('l'-'L')
+#define ANIMAL(piece)         ((piece) & 0x0f)
+#define PROMOTE(piece)        (++(piece))
+#define SENTE(piece)          (!((piece) & GOTE))
+#define FLIP(piece)           ((piece) ^= GOTE)
+#define PIECE_SENTE(animal)   ('A'-1+(animal))
+#define PIECE_GOTE(animal)    (PIECE_SENTE(animal) | GOTE)
 
-// bitmasks for hashtable scan
+// bitmasks for hashtable
 #define ILLEGAL  0x00
 #define LEGAL    0x01
 #define EOHT     0xff
@@ -84,7 +100,7 @@ private:
         }
 
         PieceIterator& operator++() {
-            while (++i<N+D && (grid[i]==' ' || (grid[i] & ('l'-'L')))) ;
+            while (++i<N+D && (!ANIMAL(grid[i]) || !SENTE(grid[i]))) ;
             return *this;
         }
     };
@@ -135,13 +151,13 @@ private:
                     (i==4 ||
                      (n%3==0 && i%3==0) ||
                      (n%3==2 && i%3==2) ||
-                     (grid[n-4+i]!=' ' &&
-                      !((grid[n]^grid[n-4+i]) & ('l'-'L'))) ||
-                     ((grid[n] & 0x0f)==('C' & 0x0f) && i!=7) ||
-                     ((grid[n] & 0x0f)==('D' & 0x0f) && (i==0 || i==2)) ||
-                     ((grid[n] & 0x0f)==('E' & 0x0f) && (i&1)) ||
-                     ((grid[n] & 0x0f)==('G' & 0x0f) && !(i&1)))) ||
-                   (n>=N && ++i<N && grid[i]!=' ')) ;
+                     (ANIMAL(grid[n-4+i]) &&
+                      !((grid[n]^grid[n-4+i]) & GOTE)) ||
+                     (ANIMAL(grid[n])==CHICK    && i!=7) ||
+                     (ANIMAL(grid[n])==HEN      && (i==0 || i==2)) ||
+                     (ANIMAL(grid[n])==ELEPHANT && (i&1)) ||
+                     (ANIMAL(grid[n])==GIRAFFE  && !(i&1)))) ||
+                   (n>=N && ++i<N && ANIMAL(grid[i]))) ;
 
             return *this;
         }
@@ -209,7 +225,7 @@ public:
 private:
     // determine the order of pieces on hand
     static int reorder(uint8 p, uint8 q) {
-        return p!=q && (p==' ' || (q!=' ' && (p&0x1f)<(q&0x1f)));
+        return !ANIMAL(p) || (ANIMAL(q) && ANIMAL(p)<ANIMAL(q));
     }
 
     // find a piece on the board
@@ -234,8 +250,8 @@ private:
             memcpy(grid, g, N);
 
             for (int i=0; i<N+D; i++) {
-                if (grid[i]!=' ') {
-                    grid[i] ^= 'l'-'L';
+                if (ANIMAL(grid[i])) {
+                    FLIP(grid[i]);
                 }
             }
         }
@@ -244,31 +260,31 @@ private:
 public:
     Board(const char* s="ELG C  c gle      ", int sente=1)
         : sente(sente), illegal(0), deeper(0), win(0), loss(0) {
-        memset(grid, ' ', sizeof(grid));
+        memset(grid, EMPTY, sizeof(grid));
         memcpy(grid, s, min(sizeof(grid), strlen(s)));
     }
 
     Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), win(0), loss(0) {
         memcpy(grid, g, sizeof(grid));
 
-        if (grid[move.to()]!=' ') {
-            if (grid[move.to()]=='l') {
+        if (ANIMAL(grid[move.to()])) {
+            if (ANIMAL(grid[move.to()])==LION) {
                 win++;
             }
 
-            grid[find(' ', N, N+D)] = grid[move.to()]^('l'-'L');
+            grid[find(EMPTY, N, N+D)] = grid[move.to()]^GOTE;
         }
 
         grid[move.to()] = grid[move.from()];
-        grid[move.from()] = ' ';
+        grid[move.from()] = EMPTY;
 
         if (move.to()>=N-W) {
-            if (grid[move.to()]=='C') {
+            if (ANIMAL(grid[move.to()])==CHICK) {
                 // promote chick
-                grid[move.to()]++;
+                PROMOTE(grid[move.to()]);
             }
 
-            if (grid[move.to()]=='L') {
+            if (ANIMAL(grid[move.to()])==LION) {
                 // lion on final rank
                 deeper++;
             }
@@ -285,7 +301,7 @@ public:
         }
 
         for (int i=N-W; i<N; i++) {
-            if (grid[i]=='L') {
+            if (SENTE(grid[i]) && ANIMAL(grid[i])==LION) {
                 win++;
                 break;
             }
@@ -298,11 +314,11 @@ public:
             return;
         }
 
-        memset(grid, ' ', sizeof(grid));
+        memset(grid, EMPTY, sizeof(grid));
 
         // decode the position of both lions
-        grid[lionPosition[2*(h>>29)]] = 'L';
-        grid[lionPosition[2*(h>>29)+1]] = 'l';
+        grid[lionPosition[2*(h>>29)]] = PIECE_SENTE(LION);
+        grid[lionPosition[2*(h>>29)+1]] = PIECE_GOTE(LION);
 
         // board orientation
         sente = h & 0x01 ? 0 : 1;
@@ -311,7 +327,7 @@ public:
         // decode the pieces on the remaining 10 fields
         uint32 count[4] = { 0 };
         for (int i=0; i<N && h; i++) {
-            if (grid[i]==' ') {
+            if (!ANIMAL(grid[i])) {
                 if (h & 0x03) {
                     grid[i] = animal[h & 0x03];
                     if (++count[h & 0x03]>2) {
@@ -337,9 +353,9 @@ public:
 
         // assign pieces to sente/gote
         for (int i=0; i<N+D; i++) {
-            if (grid[i]!=' ' && grid[i]!='L' && grid[i]!='l') {
+            if (ANIMAL(grid[i]) && ANIMAL(grid[i])!=LION) {
                 if (h & 0x01) {
-                    grid[i] |= 'l'-'L';
+                    grid[i] |= GOTE;
                 }
 
                 h >>= 1;
@@ -348,20 +364,15 @@ public:
 
         // promote chicks
         for (int i=0; i<N+D; i++) {
-            if (grid[i]=='C' || grid[i]=='c') {
+            if (ANIMAL(grid[i])==CHICK) {
                 if (h & 0x01) {
                     if (i<N) {
-                        grid[i]++;
+                        PROMOTE(grid[i]);
                     } else {
                         // chicks to drop can't be promoted
                         illegal++;
                         return;
                     }
-                } else if ((grid[i]=='C' && i<W) ||
-                           (grid[i]=='c' && i>=N-W)) {
-                    // chicks on the last line must be promoted
-                    illegal++;
-                    return;
                 }
 
                 h >>= 1;
@@ -382,8 +393,8 @@ public:
             uint64 h = 0;
             flip();
 
-            int l = find('L');
-            int n = find('l');
+            int l = find(PIECE_SENTE(LION));
+            int n = find(PIECE_GOTE(LION));
 
             if (l>=N || n>=N || lionGrid[l][n]>L) {
                 flip();
@@ -394,10 +405,9 @@ public:
 
             // promote chicks
             for (int i=N+D; i--;) {
-                if (grid[i]=='C' || grid[i]=='c' ||
-                    grid[i]=='D' || grid[i]=='d') {
+                if (ANIMAL(grid[i])==CHICK || ANIMAL(grid[i])==HEN) {
                     h <<= 1;
-                    if (grid[i]=='D' || grid[i]=='d') {
+                    if (ANIMAL(grid[i])==HEN) {
                         h |= 0x01;
                     }
                 }
@@ -416,9 +426,9 @@ public:
 
             // assign pieces to sente/gote
             for (int i=N+D; i--;) {
-                if (grid[i]!=' ' && grid[i]!='L' && grid[i]!='l') {
+                if (ANIMAL(grid[i]) && ANIMAL(grid[i])!=LION) {
                     h <<= 1;
-                    if (grid[i] & ('l'-'L')) {
+                    if (grid[i] & GOTE) {
                         h |= 0x01;
                     }
                 }
@@ -426,10 +436,10 @@ public:
 
             // encode the pieces on the remaining 10 fields
             for (int i=N; i--;) {
-                if (grid[i]!='L' && grid[i]!='l') {
+                if (ANIMAL(grid[i])!=LION) {
                     h <<=2;
-                    if (grid[i]!=' ') {
-                        h |= ((grid[i] & ~('l'-'L'))-'C')/2+1;
+                    if (ANIMAL(grid[i])) {
+                        h |= (ANIMAL(grid[i])-CHICK)/2+1;
                     }
                 }
             }
@@ -459,7 +469,7 @@ public:
             }
 
             for (int i=N; i<N+D; i++) {
-                if (grid[i]!=' ') {
+                if (ANIMAL(grid[i])) {
                     std::cout << grid[i];
                 }
             }
@@ -479,6 +489,7 @@ public:
             Board& b = *this;
             std::cout << std::hex << "0x" << b() << std::dec << std::endl;
             b.print();
+            std::cout << std::endl;
 
             for (Board::PositionIterator& child=b.children(); ++child;) {
                 std::cout << "move" << child.getMove().from() << "->" << child.getMove().to() << std::endl;
@@ -486,6 +497,7 @@ public:
             }
         } else {
             print();
+            std::cout << std::endl;
         }
     }
 };
@@ -495,7 +507,7 @@ uint8 Board::lionPosition[2*L] = { 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 1
 
 uint8 Board::lionGrid[N][N];
 
-uint8 Board::animal[4] = { ' ', 'C', 'E', 'G' }; // promote C->D
+uint8 Board::animal[4] = { EMPTY, PIECE_SENTE(CHICK), PIECE_SENTE(ELEPHANT), PIECE_SENTE(GIRAFFE) }; // promote C->D
 
 // hashtable on disk
 class Hashtable {
@@ -537,6 +549,10 @@ public:
                 free(map);
             }
         }
+    }
+
+    operator void*() {
+        return map;
     }
 
     uint8& operator[](uint64 n) {
@@ -584,8 +600,17 @@ int main(int argc, const char** argv) {
         }
     }
 
-    Hashtable hashtable(S, hashtablename);
     Board::initialize();
+    Hashtable hashtable(S, hashtablename);
+
+    if (!hashtable) {
+        if (check || count) {
+            std::cout << "no hashtable" << std::endl;
+        }
+
+        check = 0;
+        count = 0;
+    }
 
     struct timeval t0;
     gettimeofday(&t0, NULL);

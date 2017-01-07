@@ -1,2 +1,2 @@
 dobutsu : dobutsu.cpp
-	g++ -o $@ $<
+	g++ -g -o $@ $<

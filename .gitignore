@@ -28,5 +28,4 @@
 *.out
 *.app
 dobutsu
-hashtable
-hashtable.gz
+hashtable*

@@ -34,6 +34,8 @@
 // <6 bits for 39 legal, non-final positions for non-adjacent lions
 #define S (L*(1ULL<<(2+D+2*(N-2)+1)))
 
+#define min(a, b) ((a)<(b)? (a) : (b))
+
 // bitmasks for hashtable scan
 #define ILLEGAL  0x00
 #define LEGAL    0x01
@@ -56,6 +58,9 @@ private:
     uint8 grid[N+D];
     int sente;
     int illegal;
+    int deeper;
+    int win;
+    int loss;
 
     // iterate over a grid to find all pieces
     class PieceIterator {
@@ -240,25 +245,57 @@ private:
 
 public:
     Board(const char* s="ELG C  c gle      ", int sente=1)
-        : sente(sente), illegal(0) {
-        memcpy(grid, s, sizeof(grid));
+        : sente(sente), illegal(0), deeper(0), win(0), loss(0) {
+        memset(grid, ' ', sizeof(grid));
+        memcpy(grid, s, min(sizeof(grid), strlen(s)));
     }
 
-    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0) {
+    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), win(0), loss(0) {
         memcpy(grid, g, sizeof(grid));
 
         if (grid[move.to()]!=' ') {
+            if (grid[move.to()]=='l') {
+                win++;
+            }
+
             grid[find(' ', N, N+D)] = grid[move.to()]^('l'-'L');
         }
 
         grid[move.to()] = grid[move.from()];
         grid[move.from()] = ' ';
+
+        if (move.to()>=N-W) {
+            if (grid[move.to()]=='C') {
+                // promote chick
+                grid[move.to()]++;
+            }
+
+            if (grid[move.to()]=='L') {
+                // lion on final rank
+                deeper++;
+            }
+        }
+
         flip();
         sente = !s;
+        if (win) {
+            win = 0;
+            loss++;
+        } else if (loss) {
+            win++;
+            loss = 0;
+        }
+
+        for (int i=N-W; i<N; i++) {
+            if (grid[i]=='L') {
+                win++;
+                break;
+            }
+        }
     }
 
     Board(uint64 h)
-        : sente(0), illegal(h>=S) {
+        : sente(0), illegal(h>=S), deeper(0), win(0), loss(0) {
         if (illegal) {
             return;
         }
@@ -372,7 +409,6 @@ public:
             for (int i=N; i<N+D-1; i++) {
                 for (int j=i+1; j<N+D; j++) {
                     if (reorder(grid[i], grid[j])) {
-                        std::cout << "swap" << std::endl;
                         uint8 swap = grid[i];
                         grid[i] = grid[j];
                         grid[j] = swap;
@@ -425,9 +461,12 @@ public:
             }
 
             for (int i=N; i<N+D; i++) {
-                std::cout << grid[i];
+                if (grid[i]!=' ') {
+                    std::cout << grid[i];
+                }
             }
-            std::cout << std::endl;
+
+            std::cout << (win ? " won" : loss ? " lost" : "") << std::endl;
         }
     }
 
@@ -438,14 +477,14 @@ public:
 
     // recursively search to a given depth
     Board& search(int depth) {
-        if (depth>0) {
+        if (!win && !loss && depth+deeper>0) {
             Board& b = *this;
             std::cout << std::hex << "0x" << b() << std::dec << std::endl;
             b.print();
 
             for (Board::PositionIterator& child=b.children(); ++child;) {
                 std::cout << "move" << child.getMove().from() << "->" << child.getMove().to() << std::endl;
-                child().search(depth-1);
+                child().search(depth+deeper-1);
             }
         } else {
             print();
@@ -463,15 +502,27 @@ uint8 Board::animal[4] = { ' ', 'C', 'E', 'G' }; // promote C->D
 int main(int argc, const char** argv) {
     // command line options
     int check = 0;
+    int count = 0;
     int depth = 0;
     int print = argc==1;
     uint64 start = 0;
     uint64 stop = S;
+    const char* pos = "ELG C  c gle      ";
+    int gote = 0;
+    const char* hashtablename = "hashtable";
     for (int i=1; i<argc; i++) {
-        if (!strcmp(argv[i], "-c")) {
+        if (!strcmp(argv[i], "-b") && i+1<argc) {
+            pos = argv[++i];
+        } else if (!strcmp(argv[i], "-c")) {
             check = 1;
         } else if (!strcmp(argv[i], "-d") && i+1<argc) {
             depth = strtoll(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "-g")) {
+            gote = 1;
+        } else if (!strcmp(argv[i], "-h") && i+1<argc) {
+            hashtablename = argv[++i];
+        } else if (!strcmp(argv[i], "-n")) {
+            count = 1;
         } else if (!strcmp(argv[i], "-p")) {
             print = 1;
         } else if (!strcmp(argv[i], "-s") && i+1<argc) {
@@ -479,15 +530,15 @@ int main(int argc, const char** argv) {
         } else if (!strcmp(argv[i], "-t") && i+1<argc) {
             stop = strtoll(argv[++i], NULL, 0);
         } else {
-            std::cout << "usage: " << argv[0] << " [-c] [-p] [-s <start>] [-t <stop>]" << std::endl
-                      << "usage: " << argv[0] << " [-d <depth>] [-s <start>] [-t <stop>]" << std::endl
+            std::cout << "usage: " << argv[0] << " [-c] [-h hashtable] [-n] [-p] [-s <start>] [-t <stop>]" << std::endl
+                      << "usage: " << argv[0] << " [-b <board>] [-d <depth>] [-g] [-h hashtable]" << std::endl
                       << "defaults: start=0, stop=" << std::hex << S << std::dec << std::endl;
             return 0;
         }
     }
 
-    // hash table
-    int fd = open("dobutsu.hash", O_CREAT | O_LARGEFILE | O_RDWR, 0664);
+    // hashtable
+    int fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664);
     if (fd<0) {
         std::cout << "error: failed to open hash table" << std::endl;
     } else if (lseek(fd, S, SEEK_SET)!=S) {
@@ -547,9 +598,11 @@ int main(int argc, const char** argv) {
     }
 
     if (depth) {
-        Board b;
+        Board b(pos, !gote);
         b.search(depth);
+    }
 
+    if (count) {
         uint64 n = 0;
         for (uint64 h=start; h<stop; h+=2) {
             if ((h & ((1<<21)-1))==0) {

@@ -45,8 +45,6 @@ typedef unsigned char uint8;
 typedef unsigned int uint32;
 typedef unsigned long long uint64;
 
-static uint8* hashtable = NULL;
-
 class Board {
 private:
     // lookup tables
@@ -499,6 +497,55 @@ uint8 Board::lionGrid[N][N];
 
 uint8 Board::animal[4] = { ' ', 'C', 'E', 'G' }; // promote C->D
 
+// hashtable on disk
+class Hashtable {
+private:
+    int fd;
+    uint8* map;
+    static Hashtable* instance;
+
+public:
+    static Hashtable& get() {
+        return *instance;
+    }
+
+    Hashtable(uint64 size, const char* hashtablename=NULL)
+        : fd(-1), map(NULL) {
+        if (hashtablename &&
+            (fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664)>0 &&
+             lseek(fd, size, SEEK_SET)==size)) {
+            write(fd, "\377", 1);
+            map = (uint8*) mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
+        } else {
+            map = (uint8*) malloc(size);
+        }
+
+        instance = this;
+    }
+
+    ~Hashtable() {
+        instance = NULL;
+
+        if (fd>0) {
+            if (map) {
+                munmap(map, S);
+            }
+
+            close(fd);
+        } else {
+            if (map) {
+                free(map);
+            }
+        }
+    }
+
+    uint8& operator[](uint64 n) {
+        return map[n];
+    }
+};
+
+Hashtable* Hashtable::instance = NULL;
+
 int main(int argc, const char** argv) {
     // command line options
     int check = 0;
@@ -509,7 +556,7 @@ int main(int argc, const char** argv) {
     uint64 stop = S;
     const char* pos = "ELG C  c gle      ";
     int gote = 0;
-    const char* hashtablename = "hashtable";
+    const char* hashtablename = NULL;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i], "-b") && i+1<argc) {
             pos = argv[++i];
@@ -537,21 +584,7 @@ int main(int argc, const char** argv) {
         }
     }
 
-    // hashtable
-    int fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664);
-    if (fd<0) {
-        std::cout << "error: failed to open hash table" << std::endl;
-    } else if (lseek(fd, S, SEEK_SET)!=S) {
-        std::cout << "error: failed to access hash table of size " << S << std::endl;
-    } else {
-        write(fd, "\377", 1);
-        hashtable = (uint8*) mmap(NULL, S, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
-
-        if (!hashtable) {
-            std::cout << "error: failed to map hash table" << std::endl;
-        }
-    }
-
+    Hashtable hashtable(S, hashtablename);
     Board::initialize();
 
     struct timeval t0;
@@ -580,10 +613,7 @@ int main(int argc, const char** argv) {
 
                 if (check) {
                     if (b()==h) {
-                        if (fd>0) {
-                            lseek(fd, h, SEEK_SET);
-                            write(fd, "\001", 1);
-                        }
+                        hashtable[h] |= LEGAL;
                     } else {
                         std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
 
@@ -598,11 +628,13 @@ int main(int argc, const char** argv) {
     }
 
     if (depth) {
+        // search to the given depth
         Board b(pos, !gote);
         b.search(depth);
     }
 
     if (count) {
+        // count positions
         uint64 n = 0;
         for (uint64 h=start; h<stop; h+=2) {
             if ((h & ((1<<21)-1))==0) {
@@ -621,14 +653,6 @@ int main(int argc, const char** argv) {
     struct timeval t;
     gettimeofday(&t, NULL);
     std::cout << t.tv_sec - t0.tv_sec << "s" << std::endl;
-
-    if (hashtable) {
-        munmap(hashtable, S);
-    }
-
-    if (fd>0) {
-        close(fd);
-    }
 
     return 0;
 }

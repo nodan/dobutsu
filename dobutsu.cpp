@@ -71,38 +71,45 @@ private:
     static Hashtable* instance;
     static uint64 won;
     static uint64 lost;
+    static uint64 queried;
+    static uint64 matched;
 
     uint64 size;
     int fd;
     uint8* map;
 
 public:
-    static uint8 enter(uint64 h, uint8 m) {
+    static uint8 enter(uint64 h, int depth, int result) {
+        uint8 m = result>0 ? (won++, WIN) : result<0 ? (lost++, LOSS) : 0;
+
+        return instance && instance->map && instance->size>h ?
+            (*instance)[h] |= ((depth/2)<<3) | m : m;
+    }
+
+    static int query(uint64 h, int depth, int* result) {
+        queried++;
         if (instance && instance->map && instance->size>h) {
-            if (!((*instance)[h] & m)) {
-                if (m & WIN) {
-                    won++;
+            if ((*instance)[h] & (WIN | LOSS)) {
+                *result = (*instance)[h] & WIN ? 1 : -1;
+            } else if (((*instance)[h]>>3)*2>=depth) {
+                *result = 0;
+            } else {
+                if (((*instance)[h]>>3)<depth/2) {
+                    (*instance)[h] &= 0x07;
+                    (*instance)[h] |= ((depth/2)<<3);
                 }
 
-                if (m & LOSS) {
-                    lost++;
-                }
-
-                return (*instance)[h] |= m;
+                return 0;
             }
 
-            return 0;
+            if (++matched%1000==0) {
+                std::cout << queried << " queries, " <<  matched << " matches\r" << std::flush;
+            }
+
+            return 1;
         }
 
-        if (m & WIN) {
-            won++;
-        }
-
-        if (m & LOSS) {
-            lost++;
-        }
-
-        return m;
+        return 0;
     }
 
     static uint64 wins() {
@@ -111,6 +118,14 @@ public:
 
     static uint64 losses() {
         return lost;
+    }
+
+    static uint64 queries() {
+        return queried;
+    }
+
+    static uint64 matches() {
+        return matched;
     }
 
     Hashtable(uint64 size, const char* hashtablename=NULL)
@@ -155,6 +170,8 @@ public:
 Hashtable* Hashtable::instance = NULL;
 uint64 Hashtable::won = 0;
 uint64 Hashtable::lost = 0;
+uint64 Hashtable::queried = 0;
+uint64 Hashtable::matched = 0;
 
 class Board {
 private:
@@ -168,8 +185,7 @@ private:
     int sente;
     int illegal;
     int deeper;
-    int win;
-    int loss;
+    int result;
 
     // iterate over a grid to find all pieces
     class PieceIterator {
@@ -212,6 +228,13 @@ private:
             : grid(NULL), n(N), i(N) {
         }
 
+        MoveIterator& operator=(const MoveIterator& m) {
+            grid = m.grid;
+            n = m.n;
+            i = m.i;
+            return *this;
+        }
+
         MoveIterator& reset(const PieceIterator& p) {
             grid = &p;
             n = p();
@@ -223,10 +246,10 @@ private:
             reset(p);
         }
 
-        operator void*() {
+        operator void*() const {
             return
-                n<N ? i<9 && n-4+i<N ? this : NULL :
-                i<N ? this : NULL;
+                n<N ? i<9 && n-4+i<N ? (void*) this : NULL :
+                i<N ? (void*) this : NULL;
         }
 
         int operator==(uint32 l) {
@@ -259,6 +282,7 @@ private:
     };
 
 public:
+    // iterate over all pieces and moves
     class PositionIterator {
     private:
         uint8* grid;
@@ -363,18 +387,18 @@ private:
 
 public:
     Board(const char* s="ELG C  c gle      ", int sente=1)
-        : sente(sente), illegal(0), deeper(0), win(0), loss(0) {
+        : sente(sente), illegal(0), deeper(0), result(0) {
         memset(grid, EMPTY, sizeof(grid));
         memcpy(grid, s, min(sizeof(grid), strlen(s)));
     }
 
-    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), win(0), loss(0) {
+    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), result(0) {
         memcpy(grid, g, sizeof(grid));
 
         if (ANIMAL(grid[move.to()])) {
             if (ANIMAL(grid[move.to()])==LION) {
                 // losing the lions loses the game
-                loss = __LINE__;
+                result = -__LINE__;
             }
 
             grid[find(EMPTY, N, N+D)] = FLIP(grid[move.to()]);
@@ -401,14 +425,14 @@ public:
         for (int i=N-W; i<N; i++) {
             if (SENTE(grid[i]) && ANIMAL(grid[i])==LION) {
                 // a lion surving on final rank wins
-                win = __LINE__;
+                result = __LINE__;
                 break;
             }
         }
     }
 
     Board(uint64 h)
-        : sente(0), illegal(h>=S), deeper(0), win(0), loss(0) {
+        : sente(0), illegal(h>=S), deeper(0), result(0) {
         if (illegal) {
             return;
         }
@@ -557,28 +581,39 @@ public:
     }
 
     // print the position
-    void print() {
+    void print(const MoveIterator& move = MoveIterator()) {
         if (!illegal) {
+            std::cout << (sente ? " 321" : " 123") << std::endl;
             for (int y=H; y--;) {
                 std::cout << "|";
                 for (int x=0; x<W; x++) {
                     std::cout << grid[y*W+x];
                 }
-                std::cout << "|" << std::endl;
+                std::cout << "|" << (sente ? H-y : y+1) << std::endl;
             }
 
+            int a = 0;
             for (int i=N; i<N+D; i++) {
                 if (ANIMAL(grid[i])) {
                     std::cout << grid[i];
+                    a++;
                 }
             }
 
-            if (win) {
-                std::cout << " is won #" << win << std::endl;
+            if (a) {
+                std::cout << std::endl;
             }
 
-            if (loss) {
-                std::cout << " is lost #" << loss << std::endl;
+            if (move) {
+                if (sente) {
+                    std::cout << W-(N-1-move.from())%W << (N-1-move.from())/W+1 << "->" << W-(N-1-move.to())%W << (N-1-move.to())/W+1 << " wins" << std::endl << std::endl;
+                } else {
+                    std::cout << move.from()%W+1 << move.from()/W+1 << "->" << move.to()%W+1 << move.to()/W+1 << " wins" << std::endl << std::endl;
+                }
+            }
+
+            if (result) {
+                std::cout << (result>0 ? " is won #" : " is lost #") << result << std::endl;
             }
         }
     }
@@ -591,29 +626,31 @@ public:
     // recursively search to a given depth
     int search(int depth) {
         Board& b = *this;
-        if (!win && !loss) {
-            if (depth+deeper>0) {
-                loss = __LINE__;
-                for (Board::PositionIterator& child=b.children(); !win && ++child;) {
-                    int rc = child().search(depth-1+deeper);
-                    if (rc<=0) {
-                        loss = 0;
-                        win = -rc;
+        uint64 h = b();
+        if (!result &&
+            !Hashtable::query(h, depth+deeper, &result) &&
+            depth+deeper>0) {
+            result = -__LINE__;
+            for (Board::PositionIterator& child=b.children(); result<=0 && ++child;) {
+                int rc = -child().search(depth-1+deeper);
+                if (rc>result) {
+                    if (verbose && rc>0) {
+                        b.print(child.getMove());
                     }
+
+                    result = rc;
                 }
             }
-        }
 
-        if (win || loss) {
-            uint64 h = b();
-            if (Hashtable::enter(h, win ? WIN : LOSS) && verbose) {
+            Hashtable::enter(h, depth+deeper, result);
+            if (verbose) {
                 std::cout << std::hex << "0x" << b() << std::dec << std::endl;
                 b.print();
                 std::cout << std::endl;
             }
         }
 
-        return win ? win : loss;
+        return result;
     }
 };
 
@@ -722,7 +759,7 @@ int main(int argc, const char** argv) {
             Board b(pos, !gote);
             std::cout << "depth " << d << "\r" << std::flush;
             b.search(d);
-            std::cout << Hashtable::wins() << " wins, " << Hashtable::losses() << " losses" << std::endl;
+            std::cout << Hashtable::wins() << " wins, " << Hashtable::losses() << " losses, " << Hashtable::queries() << " queries, " << Hashtable::matches() << " matches" << std::endl;
         }
     }
 

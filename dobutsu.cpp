@@ -152,13 +152,13 @@ public:
         }
     }
 
-    Hashtable(uint64 size, const char* hashtablename=NULL)
+    Hashtable(uint64 size, const char* hashtablename=NULL, int writeBack=1)
         : size(size), fd(-1), map(NULL) {
         if (hashtablename &&
             (fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664))>0 &&
              lseek(fd, size, SEEK_SET)==size) {
             write(fd, "\377", 1);
-            map = (uint8*) mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, fd, 0);
+            map = (uint8*) mmap(NULL, size, PROT_READ | PROT_WRITE, (writeBack ? MAP_SHARED : MAP_PRIVATE) | MAP_NORESERVE, fd, 0);
         } else {
             map = (uint8*) malloc(size);
         }
@@ -399,12 +399,14 @@ private:
     }
 
 public:
+    // construct a board from a position string
     Board(const char* s="ELG C  c gle      ", int sente=1)
         : sente(sente), illegal(0), deeper(0), result(0) {
         memset(grid, EMPTY, sizeof(grid));
         memcpy(grid, s, min(sizeof(grid), strlen(s)));
     }
 
+    // construct a board from a grid and a move to execute
     Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), result(0) {
         memcpy(grid, g, sizeof(grid));
 
@@ -444,6 +446,7 @@ public:
         }
     }
 
+    // construct a board from a hash value
     Board(uint64 h)
         : sente(0), illegal(h>=S), deeper(0), result(0) {
         if (illegal) {
@@ -593,7 +596,7 @@ public:
         return ~0;
     }
 
-    // print the position
+    // print the board
     void print(const MoveIterator& move = MoveIterator()) {
         if (!illegal) {
             std::cout << (sente ? " 321" : " 123") << std::endl;
@@ -643,6 +646,8 @@ public:
         if (!result &&
             !Hashtable::query(h, depth+deeper, &result) &&
             depth+deeper>0) {
+
+            // the result is a loss unless a non-losing move is found
             result = -__LINE__;
             for (Board::PositionIterator& child=b.children(); result<=0 && ++child;) {
                 int rc = -child().search(depth-1+deeper);
@@ -697,15 +702,15 @@ int main(int argc, const char** argv) {
         if (!strcmp(argv[i], "-b") && i+1<argc) {
             pos = argv[++i];
         } else if (!strcmp(argv[i], "-c")) {
-            check = 1;
+            empty = 1;
         } else if (!strcmp(argv[i], "-d") && i+1<argc) {
             depth = strtoll(argv[++i], NULL, 0);
-        } else if (!strcmp(argv[i], "-e")) {
-            empty = 1;
         } else if (!strcmp(argv[i], "-f") && i+1<argc) {
             hashtablename = argv[++i];
         } else if (!strcmp(argv[i], "-g")) {
             gote = 1;
+        } else if (!strcmp(argv[i], "-i")) {
+            check = 1;
         } else if (!strcmp(argv[i], "-n")) {
             count = 1;
         } else if (!strcmp(argv[i], "-p")) {
@@ -717,9 +722,10 @@ int main(int argc, const char** argv) {
         } else if (!strcmp(argv[i], "-v")) {
             verbose = 1;
         } else {
-            std::cout << "usage: " << argv[0] << " [-c] [-e] [-f hashtable] [-n] [-p] [-s <start>] [-t <stop>] [-v]" << std::endl
+            std::cout << "usage: " << argv[0] << " [-c] [-i] -f hashtable] [-n] [-p] [-s <start>] [-t <stop>] [-v]" << std::endl
                       << "usage: " << argv[0] << " [-b <board>] [-d <depth>] [-g] [-f hashtable] [-v]" << std::endl
-                      << "-e: empty hash table loss/win information" << std::endl
+                      << "-c: clear hashtable loss/win information" << std::endl
+                      << "-i: initialize hashtable" << std::endl
                       << "-n: count legal positions in hashtable" << std::endl
                       << "-p: print legal positions" << std::endl
                       << "defaults: start=0, stop=" << std::hex << S << std::dec << std::endl;
@@ -744,7 +750,7 @@ int main(int argc, const char** argv) {
     struct timeval t0;
     gettimeofday(&t0, NULL);
 
-    if (check || print) {
+    if (check) {
         // iterate over all possible hash values for sente (+=2)
         uint64 n = 0;
         for (uint64 h=start; h<stop; h+=2) {
@@ -753,27 +759,19 @@ int main(int argc, const char** argv) {
                 std::cout << std::setprecision(3) << 100.0*h/(stop-start) << "%\r" << std::flush;
             }
 
-            if (print || check) {
-                Board b(h);
+            Board b(h);
 
-                // count legal positions
-                if (b) {
-                    n++;
+            // count legal positions
+            if (b) {
+                n++;
 
-                    if (print) {
-                        std::cout << std::hex << "0x" << h << std::dec << std::endl;
-                        b.print();
-                        std::cout << std::endl;
-                    }
+                if (check) {
+                    if (b()==h) {
+                        hashtable[h] |= LEGAL;
+                    } else {
+                        std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
 
-                    if (check) {
-                        if (b()==h) {
-                            hashtable[h] |= LEGAL;
-                        } else {
-                            std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
-
-                            break;
-                        }
+                        break;
                     }
                 }
             }
@@ -793,7 +791,7 @@ int main(int argc, const char** argv) {
         }
     }
 
-    if (count || empty) {
+    if (count || empty || print) {
         // count positions
         uint64 n = 0;
         uint64 w = 0;
@@ -808,10 +806,18 @@ int main(int argc, const char** argv) {
                 n++;
 
                 if (hashtable[h] & WIN) {
+                    if (verbose) {
+                        std::cout << "0x" << std::hex << h << std::dec << " wins" << std::endl;
+                    }
+
                     w++;
                 }
 
                 if (hashtable[h] & LOSS) {
+                    if (verbose) {
+                        std::cout << "0x" << std::hex << h << std::dec << " loses" << std::endl;
+                    }
+
                     l++;
                 }
 
@@ -819,6 +825,13 @@ int main(int argc, const char** argv) {
                     if (hashtable[h] & ~LEGAL) {
                         hashtable[h] &= LEGAL;
                     }
+                }
+
+                if (print) {
+                    Board b(h);
+                    std::cout << std::hex << "0x" << h << std::dec << std::endl;
+                    b.print();
+                    std::cout << std::endl;
                 }
             }
         }

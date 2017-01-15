@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <iomanip>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -128,6 +129,15 @@ public:
         return matched;
     }
 
+    static void intHandler(int) {
+        std::cout << std::endl << "got ^C, exiting ..." << std::endl;
+        if (instance) {
+            instance->unmap();
+        }
+
+        exit(1);
+    }
+
     Hashtable(uint64 size, const char* hashtablename=NULL)
         : size(size), fd(-1), map(NULL) {
         if (hashtablename &&
@@ -140,22 +150,29 @@ public:
         }
 
         instance = this;
+        signal(SIGINT, intHandler);
     }
 
-    ~Hashtable() {
-        instance = NULL;
-
+    void unmap() {
         if (fd>0) {
             if (map) {
                 munmap(map, S);
             }
 
             close(fd);
+            sync();
         } else {
             if (map) {
                 free(map);
             }
         }
+
+        map = NULL;
+    }
+
+    ~Hashtable() {
+        instance = NULL;
+        unmap();
     }
 
     operator void*() {
@@ -211,7 +228,7 @@ private:
         }
 
         PieceIterator& operator++() {
-            while (++i<N+D && (!ANIMAL(grid[i]) || !SENTE(grid[i]))) ;
+            while (++i<N+D && (!ANIMAL(grid[i]) || !SENTE(grid[i]) || (i>N && ANIMAL(grid[i])==ANIMAL(grid[i-1])))) ;
             return *this;
         }
     };
@@ -664,6 +681,7 @@ uint8 Board::animal[4] = { EMPTY, PIECE_SENTE(CHICK), PIECE_SENTE(ELEPHANT), PIE
 int main(int argc, const char** argv) {
     // command line options
     int check = 0;
+    int empty = 0;
     int count = 0;
     int depth = 0;
     int print = argc==1;
@@ -679,6 +697,8 @@ int main(int argc, const char** argv) {
             check = 1;
         } else if (!strcmp(argv[i], "-d") && i+1<argc) {
             depth = strtoll(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "-e")) {
+            empty = 1;
         } else if (!strcmp(argv[i], "-f") && i+1<argc) {
             hashtablename = argv[++i];
         } else if (!strcmp(argv[i], "-g")) {
@@ -694,8 +714,11 @@ int main(int argc, const char** argv) {
         } else if (!strcmp(argv[i], "-v")) {
             verbose = 1;
         } else {
-            std::cout << "usage: " << argv[0] << " [-c] [-f hashtable] [-n] [-p] [-s <start>] [-t <stop>] [-v]" << std::endl
+            std::cout << "usage: " << argv[0] << " [-c] [-e] [-f hashtable] [-n] [-p] [-s <start>] [-t <stop>] [-v]" << std::endl
                       << "usage: " << argv[0] << " [-b <board>] [-d <depth>] [-g] [-f hashtable] [-v]" << std::endl
+                      << "-e: empty hash table loss/win information" << std::endl
+                      << "-n: count legal positions in hashtable" << std::endl
+                      << "-p: print legal positions" << std::endl
                       << "defaults: start=0, stop=" << std::hex << S << std::dec << std::endl;
             return 0;
         }
@@ -705,11 +728,12 @@ int main(int argc, const char** argv) {
     Hashtable hashtable(S, hashtablename);
 
     if (!hashtable) {
-        if (check || count) {
+        if (check || empty || count) {
             std::cout << "no hashtable" << std::endl;
         }
 
         check = 0;
+        empty = 0;
         count = 0;
     }
 
@@ -725,25 +749,27 @@ int main(int argc, const char** argv) {
                 std::cout << std::setprecision(3) << 100.0*h/(stop-start) << "%\r" << std::flush;
             }
 
-            Board b(h);
+            if (print || check) {
+                Board b(h);
 
-            // count legal positions
-            if (b) {
-                n++;
+                // count legal positions
+                if (b) {
+                    n++;
 
-                if (print) {
-                    std::cout << std::hex << "0x" << h << std::dec << std::endl;
-                    b.print();
-                    std::cout << std::endl;
-                }
+                    if (print) {
+                        std::cout << std::hex << "0x" << h << std::dec << std::endl;
+                        b.print();
+                        std::cout << std::endl;
+                    }
 
-                if (check) {
-                    if (b()==h) {
-                        hashtable[h] |= LEGAL;
-                    } else {
-                        std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
+                    if (check) {
+                        if (b()==h) {
+                            hashtable[h] |= LEGAL;
+                        } else {
+                            std::cout << std::hex << "0x" << h << "/" << "0x" << b() << std::dec << std::endl;
 
-                        break;
+                            break;
+                        }
                     }
                 }
             }
@@ -763,7 +789,7 @@ int main(int argc, const char** argv) {
         }
     }
 
-    if (count) {
+    if (count || empty) {
         // count positions
         uint64 n = 0;
         for (uint64 h=start; h<stop; h+=2) {
@@ -774,6 +800,12 @@ int main(int argc, const char** argv) {
 
             if (hashtable[h] & LEGAL) {
                 n++;
+
+                if (empty) {
+                    if (hashtable[h] & ~LEGAL) {
+                        hashtable[h] &= LEGAL;
+                    }
+                }
             }
         }
 

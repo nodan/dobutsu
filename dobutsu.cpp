@@ -79,6 +79,23 @@ private:
     int fd;
     uint8* map;
 
+    void flush() {
+        if (fd>0) {
+            if (map) {
+                munmap(map, S);
+            }
+
+            close(fd);
+            sync();
+        } else {
+            if (map) {
+                free(map);
+            }
+        }
+
+        map = NULL;
+    }
+
 public:
     static uint8 enter(uint64 h, int depth, int result) {
         uint8 m = result>0 ? (won++, WIN) : result<0 ? (lost++, LOSS) : 0;
@@ -129,13 +146,10 @@ public:
         return matched;
     }
 
-    static void intHandler(int) {
-        std::cout << std::endl << "got ^C, exiting ..." << std::endl;
+    static void unmap() {
         if (instance) {
-            instance->unmap();
+            instance->flush();
         }
-
-        exit(1);
     }
 
     Hashtable(uint64 size, const char* hashtablename=NULL)
@@ -144,35 +158,17 @@ public:
             (fd = open(hashtablename, O_CREAT | O_LARGEFILE | O_RDWR, 0664))>0 &&
              lseek(fd, size, SEEK_SET)==size) {
             write(fd, "\377", 1);
-            map = (uint8*) mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
+            map = (uint8*) mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, fd, 0);
         } else {
             map = (uint8*) malloc(size);
         }
 
         instance = this;
-        signal(SIGINT, intHandler);
-    }
-
-    void unmap() {
-        if (fd>0) {
-            if (map) {
-                munmap(map, S);
-            }
-
-            close(fd);
-            sync();
-        } else {
-            if (map) {
-                free(map);
-            }
-        }
-
-        map = NULL;
     }
 
     ~Hashtable() {
         instance = NULL;
-        unmap();
+        flush();
     }
 
     operator void*() {
@@ -678,6 +674,13 @@ uint8 Board::lionGrid[N][N];
 
 uint8 Board::animal[4] = { EMPTY, PIECE_SENTE(CHICK), PIECE_SENTE(ELEPHANT), PIECE_SENTE(GIRAFFE) }; // promote C->D
 
+static void intHandler(int) {
+    std::cout << std::endl << "got ^C, exiting ..." << std::endl;
+    Hashtable::unmap();
+
+    exit(1);
+}
+
 int main(int argc, const char** argv) {
     // command line options
     int check = 0;
@@ -726,6 +729,7 @@ int main(int argc, const char** argv) {
 
     Board::initialize();
     Hashtable hashtable(S, hashtablename);
+    signal(SIGINT, intHandler);
 
     if (!hashtable) {
         if (check || empty || count) {
@@ -792,6 +796,8 @@ int main(int argc, const char** argv) {
     if (count || empty) {
         // count positions
         uint64 n = 0;
+        uint64 w = 0;
+        uint64 l = 0;
         for (uint64 h=start; h<stop; h+=2) {
             if ((h & ((1<<21)-1))==0) {
                 // print progress every 1M moves
@@ -801,6 +807,14 @@ int main(int argc, const char** argv) {
             if (hashtable[h] & LEGAL) {
                 n++;
 
+                if (hashtable[h] & WIN) {
+                    w++;
+                }
+
+                if (hashtable[h] & LOSS) {
+                    l++;
+                }
+
                 if (empty) {
                     if (hashtable[h] & ~LEGAL) {
                         hashtable[h] &= LEGAL;
@@ -809,7 +823,7 @@ int main(int argc, const char** argv) {
             }
         }
 
-        std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%)" << std::endl;
+        std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%), " << w << " wins, " << l << " losses" << std::endl;
     }
 
     struct timeval t;

@@ -98,14 +98,10 @@ private:
 
 public:
     static uint8 enter(uint64 h, int depth, int result) {
-        uint8 m = result>0 ? (won++, WIN) : result<0 ? (lost++, LOSS) : 0;
-
-        if (result) {
-            std::cout << "." << std::flush;
-        }
+        uint8 m = result>0 ? (won++, WIN | LEGAL) : result<0 ? (lost++, LOSS | LEGAL) : LEGAL;
 
         return instance && instance->map && instance->size>h ?
-            (*instance)[h] |= ((depth/2)<<3) | m : m;
+            (*instance)[h] = ((depth/2)<<3) | m : m;
     }
 
     static int query(uint64 h, int depth, int* result) {
@@ -201,7 +197,6 @@ private:
     uint8 grid[N+D];
     int sente;
     int illegal;
-    int deeper;
     int result;
 
     // iterate over a grid to find all pieces
@@ -405,19 +400,19 @@ private:
 public:
     // construct a board from a position string
     Board(const char* s="ELG C  c gle      ", int sente=1)
-        : sente(sente), illegal(0), deeper(0), result(0) {
+        : sente(sente), illegal(0), result(0) {
         memset(grid, EMPTY, sizeof(grid));
         memcpy(grid, s, min(sizeof(grid), strlen(s)));
     }
 
     // construct a board from a grid and a move to execute
-    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), deeper(0), result(0) {
+    Board(uint8* g, int s, const MoveIterator& move) : sente(0), illegal(0), result(0) {
         memcpy(grid, g, sizeof(grid));
 
         if (ANIMAL(grid[move.to()])) {
             if (ANIMAL(grid[move.to()])==LION) {
                 // losing the lions loses the game
-                result = -__LINE__;
+                result = -9999;
             }
 
             grid[find(EMPTY, N, N+D)] = FLIP(grid[move.to()]);
@@ -432,10 +427,12 @@ public:
                 PROMOTE(grid[move.to()]);
             }
 
+#if 0
             if (ANIMAL(grid[move.to()])==LION) {
                 // lion on final rank
-                deeper += 2;
+                ...;
             }
+#endif
         }
 
         flip();
@@ -444,7 +441,7 @@ public:
         for (int i=N-W; i<N; i++) {
             if (SENTE(grid[i]) && ANIMAL(grid[i])==LION) {
                 // a lion surving on final rank wins
-                result = __LINE__;
+                result = 9999;
                 break;
             }
         }
@@ -452,7 +449,7 @@ public:
 
     // construct a board from a hashvalue
     Board(uint64 h)
-        : sente(0), illegal(h>=S), deeper(0), result(0) {
+        : sente(0), illegal(h>=S), result(0) {
         if (illegal) {
             return;
         }
@@ -644,17 +641,17 @@ public:
     }
 
     // recursively search to a given depth
-    int search(int depth) {
+    int search(int depth, int min=-9999, int max=9999) {
         Board& b = *this;
         uint64 h = b();
+
         if (!result &&
-            !Hashtable::query(h, depth+deeper, &result) &&
-            depth+deeper>0) {
+            !Hashtable::query(h, depth, &result) && depth>0) {
 
             // the result is a loss unless a non-losing move is found
-            result = -__LINE__;
-            for (Board::PositionIterator& child=b.children(); result<=0 && ++child;) {
-                int rc = -child().search(depth-1+deeper);
+            result = min;
+            for (Board::PositionIterator& child=b.children(); result<max && ++child;) {
+                int rc = -child().search(depth-1, -max, -result);
                 if (rc>result) {
                     if (verbose && rc>0) {
                         b.print(child.getMove());
@@ -664,7 +661,7 @@ public:
                 }
             }
 
-            Hashtable::enter(h, depth+deeper, result);
+            Hashtable::enter(h, depth, result);
             if (verbose) {
                 std::cout << std::hex << "0x" << b() << std::dec << std::endl;
                 b.print();
@@ -788,7 +785,7 @@ int main(int argc, const char** argv) {
             }
         }
 
-        // 336760432 positions
+        // 474092736 positions
         std::cout << n << " positions (" << 100.0*n/((stop-start)/2) << "%)" << std::endl;
     }
 
@@ -813,7 +810,7 @@ int main(int argc, const char** argv) {
             depth = 4;
         }
 
-        for (uint64 h=start; h<stop; h+=2) {
+        for (uint64 h=start; h<stop; h+=1) {
             if ((h & ((1<<(scan ? 14 : 21))-1))==0) {
                 // print progress every 1M moves
                 struct timeval t;
@@ -828,41 +825,45 @@ int main(int argc, const char** argv) {
 
             if (hashtable[h] & LEGAL) {
                 n++;
+            }
 
-                if (hashtable[h] & WIN) {
-                    if (verbose) {
-                        std::cout << "0x" << std::hex << h << std::dec << " wins" << std::endl;
-                    }
-
-                    w++;
+            if (hashtable[h] & WIN) {
+                if (verbose) {
+                    std::cout << "0x" << std::hex << h << std::dec << " wins" << std::endl;
                 }
 
-                if (hashtable[h] & LOSS) {
-                    if (verbose) {
-                        std::cout << "0x" << std::hex << h << std::dec << " loses" << std::endl;
-                    }
+                w++;
+            }
 
-                    l++;
+            if (hashtable[h] & LOSS) {
+                if (verbose) {
+                    std::cout << "0x" << std::hex << h << std::dec << " loses" << std::endl;
                 }
 
-                if (empty) {
-                    if (hashtable[h] & ~LEGAL) {
-                        hashtable[h] &= LEGAL;
-                    }
-                }
+                l++;
+            }
 
-                if (print) {
-                    Board b(h);
+            if (print) {
+                Board b(h);
+                if (b) {
                     std::cout << std::hex << "0x" << h << std::dec << std::endl;
                     b.print();
                     std::cout << std::endl;
                 }
+            }
 
-                if (scan) {
-                    if ((hashtable[h] & (WIN | LOSS))==0) {
-                        Board b(h);
+            if (scan) {
+                if ((hashtable[h] & (WIN | LOSS))==0) {
+                    Board b(h);
+                    if (b) {
                         b.search(depth);
                     }
+                }
+            }
+
+            if (empty) {
+                if (hashtable[h] & ~LEGAL) {
+                    hashtable[h] &= LEGAL;
                 }
             }
         }
